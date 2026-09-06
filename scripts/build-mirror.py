@@ -17,6 +17,11 @@ import argparse, json, pathlib, re
 
 REPO = "jibey-fs/terraform-provider-fspanos"
 NAMESPACE, TYPE = "jibey-fs", "fspanos"
+# The mirror protocol keys packages by REGISTRY HOSTNAME, and the default
+# differs by CLI: tofu resolves "jibey-fs/fspanos" to
+# registry.opentofu.org/jibey-fs/fspanos, terraform to registry.terraform.io/...
+# Publishing under both means either CLI finds it.
+HOSTNAMES = ["registry.opentofu.org", "registry.terraform.io"]
 PROJECT = "terraform-provider-fspanos"
 
 
@@ -45,20 +50,20 @@ def main():
     if not archives:
         raise SystemExit(f"no archives matched in {a.sums} for version {version}")
 
-    d = pathlib.Path(a.out) / NAMESPACE / TYPE
-    d.mkdir(parents=True, exist_ok=True)
+    for host in HOSTNAMES:
+        d = pathlib.Path(a.out) / host / NAMESPACE / TYPE
+        d.mkdir(parents=True, exist_ok=True)
 
-    # index.json accumulates versions, so an older release stays installable
-    # after a new one lands.
-    index_path = d / "index.json"
-    versions = json.loads(index_path.read_text())["versions"] if index_path.exists() else {}
-    versions[version] = {}
-    index_path.write_text(json.dumps({"versions": versions}, indent=2, sort_keys=True) + "\n")
+        # index.json accumulates versions, so an older release stays
+        # installable after a new one lands.
+        index_path = d / "index.json"
+        versions = json.loads(index_path.read_text())["versions"] if index_path.exists() else {}
+        versions[version] = {}
+        index_path.write_text(json.dumps({"versions": versions}, indent=2, sort_keys=True) + "\n")
 
-    (d / f"{version}.json").write_text(
-        json.dumps({"archives": dict(sorted(archives.items()))}, indent=2) + "\n")
-
-    print(f"{len(archives)} platforms for {version}; {len(versions)} version(s) in index")
+        (d / f"{version}.json").write_text(
+            json.dumps({"archives": dict(sorted(archives.items()))}, indent=2) + "\n")
+        print(f"{host}: {len(archives)} platforms for {version}, {len(versions)} version(s)")
 
 
 if __name__ == "__main__":

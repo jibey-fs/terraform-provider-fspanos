@@ -1,8 +1,12 @@
 # Publish the provider network mirror to GitHub Pages.
 #
 # The mirror protocol is static JSON, so Pages is a sufficient host:
-#   /jibey-fs/fspanos/index.json      versions
-#   /jibey-fs/fspanos/<version>.json  archives per os_arch
+#   /<registry-host>/jibey-fs/fspanos/index.json      versions
+#   /<registry-host>/jibey-fs/fspanos/<version>.json  archives per os_arch
+#
+# Packages are keyed by registry hostname, and the default differs per CLI:
+# tofu wants registry.opentofu.org, terraform wants registry.terraform.io. Both
+# are published.
 #
 # The zips are NOT copied here -- the JSON points at the release assets, so a
 # publish is a few KB. Consumers set:
@@ -53,9 +57,9 @@ jobs:
       - name: Fetch current mirror
         continue-on-error: true
         run: |
-          curl -fsSL -o - https://jibey-fs.github.io/terraform-provider-fspanos/jibey-fs/fspanos/index.json \
+          curl -fsSL -o - https://jibey-fs.github.io/terraform-provider-fspanos/registry.opentofu.org/jibey-fs/fspanos/index.json \
             | tee /tmp/index.json
-          mkdir -p site/jibey-fs/fspanos && cp /tmp/index.json site/jibey-fs/fspanos/index.json
+          for h in registry.opentofu.org registry.terraform.io; do mkdir -p "site/$h/jibey-fs/fspanos"; cp /tmp/index.json "site/$h/jibey-fs/fspanos/index.json"; done
 
       - name: Download release checksums
         env:
