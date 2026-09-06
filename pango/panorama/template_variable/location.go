@@ -1,0 +1,188 @@
+package template_variable
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/PaloAltoNetworks/pango/errors"
+	"github.com/PaloAltoNetworks/pango/util"
+	"github.com/PaloAltoNetworks/pango/version"
+)
+
+type Location struct {
+	Template            *TemplateLocation            `json:"template,omitempty"`
+	TemplateStack       *TemplateStackLocation       `json:"template_stack,omitempty"`
+	TemplateStackDevice *TemplateStackDeviceLocation `json:"template_stack_device,omitempty"`
+}
+
+type TemplateLocation struct {
+	PanoramaDevice string `json:"panorama_device"`
+	Template       string `json:"template"`
+}
+type TemplateStackLocation struct {
+	PanoramaDevice string `json:"panorama_device"`
+	TemplateStack  string `json:"template_stack"`
+}
+type TemplateStackDeviceLocation struct {
+	Device         string `json:"device"`
+	PanoramaDevice string `json:"panorama_device"`
+	TemplateStack  string `json:"template_stack"`
+}
+
+func NewTemplateLocation() *Location {
+	return &Location{Template: &TemplateLocation{
+		PanoramaDevice: "localhost.localdomain",
+		Template:       "",
+	},
+	}
+}
+func NewTemplateStackLocation() *Location {
+	return &Location{TemplateStack: &TemplateStackLocation{
+		PanoramaDevice: "localhost.localdomain",
+		TemplateStack:  "",
+	},
+	}
+}
+func NewTemplateStackDeviceLocation() *Location {
+	return &Location{TemplateStackDevice: &TemplateStackDeviceLocation{
+		Device:         "",
+		PanoramaDevice: "localhost.localdomain",
+		TemplateStack:  "",
+	},
+	}
+}
+
+func (o Location) IsValid() error {
+	count := 0
+
+	switch {
+	case o.Template != nil:
+		if o.Template.PanoramaDevice == "" {
+			return fmt.Errorf("PanoramaDevice is unspecified")
+		}
+		if o.Template.Template == "" {
+			return fmt.Errorf("Template is unspecified")
+		}
+		count++
+	case o.TemplateStack != nil:
+		if o.TemplateStack.PanoramaDevice == "" {
+			return fmt.Errorf("PanoramaDevice is unspecified")
+		}
+		if o.TemplateStack.TemplateStack == "" {
+			return fmt.Errorf("TemplateStack is unspecified")
+		}
+		count++
+	case o.TemplateStackDevice != nil:
+		if o.TemplateStackDevice.Device == "" {
+			return fmt.Errorf("Device is unspecified")
+		}
+		if o.TemplateStackDevice.PanoramaDevice == "" {
+			return fmt.Errorf("PanoramaDevice is unspecified")
+		}
+		if o.TemplateStackDevice.TemplateStack == "" {
+			return fmt.Errorf("TemplateStack is unspecified")
+		}
+		count++
+	}
+
+	if count == 0 {
+		return fmt.Errorf("no path specified")
+	}
+
+	if count > 1 {
+		return fmt.Errorf("multiple paths specified: only one should be specified")
+	}
+
+	return nil
+}
+
+func (o Location) LocationFilter() *string {
+
+	return nil
+}
+
+func (o Location) XpathPrefix(vn version.Number) ([]string, error) {
+
+	var ans []string
+
+	switch {
+	case o.Template != nil:
+		if o.Template.PanoramaDevice == "" {
+			return nil, fmt.Errorf("PanoramaDevice is unspecified")
+		}
+		if o.Template.Template == "" {
+			return nil, fmt.Errorf("Template is unspecified")
+		}
+		ans = []string{
+			"config",
+			"devices",
+			util.AsEntryXpath(o.Template.PanoramaDevice),
+			"template",
+			util.AsEntryXpath(o.Template.Template),
+		}
+	case o.TemplateStack != nil:
+		if o.TemplateStack.PanoramaDevice == "" {
+			return nil, fmt.Errorf("PanoramaDevice is unspecified")
+		}
+		if o.TemplateStack.TemplateStack == "" {
+			return nil, fmt.Errorf("TemplateStack is unspecified")
+		}
+		ans = []string{
+			"config",
+			"devices",
+			util.AsEntryXpath(o.TemplateStack.PanoramaDevice),
+			"template-stack",
+			util.AsEntryXpath(o.TemplateStack.TemplateStack),
+		}
+	case o.TemplateStackDevice != nil:
+		if o.TemplateStackDevice.Device == "" {
+			return nil, fmt.Errorf("Device is unspecified")
+		}
+		if o.TemplateStackDevice.PanoramaDevice == "" {
+			return nil, fmt.Errorf("PanoramaDevice is unspecified")
+		}
+		if o.TemplateStackDevice.TemplateStack == "" {
+			return nil, fmt.Errorf("TemplateStack is unspecified")
+		}
+		ans = []string{
+			"config",
+			"devices",
+			util.AsEntryXpath(o.TemplateStackDevice.PanoramaDevice),
+			"template-stack",
+			util.AsEntryXpath(o.TemplateStackDevice.TemplateStack),
+			"devices",
+			util.AsEntryXpath(o.TemplateStackDevice.Device),
+		}
+	default:
+		return nil, errors.NoLocationSpecifiedError
+	}
+
+	return ans, nil
+}
+
+func (o Location) XpathWithComponents(vn version.Number, components ...string) ([]string, error) {
+	if len(components) != 1 {
+		return nil, fmt.Errorf("invalid number of arguments for XpathWithComponents() call")
+	}
+
+	{
+		component := components[0]
+		if component != "entry" {
+			// Accept any entry predicate produced by util.AsEntryXpath, including the
+			// injection-safe entry[@name=concat(...)] form (CWE-643).
+			if !strings.HasPrefix(component, "entry[") || !strings.HasSuffix(component, "]") {
+				return nil, errors.NewInvalidXpathComponentError(fmt.Sprintf("Name must be formatted as entry: %s", component))
+			}
+		}
+	}
+
+	ans, err := o.XpathPrefix(vn)
+	if err != nil {
+		return nil, err
+	}
+
+	ans = append(ans, "variable")
+	ans = append(ans, components[0])
+
+	return ans, nil
+}

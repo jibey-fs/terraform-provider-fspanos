@@ -73,4 +73,4 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
-replace github.com/PaloAltoNetworks/pango v0.10.3-0.20240408115758-216d8509e7cf => ../pango
+replace github.com/PaloAltoNetworks/pango v0.10.3-0.20240408115758-216d8509e7cf => ./pango
