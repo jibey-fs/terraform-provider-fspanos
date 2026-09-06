@@ -1,0 +1,80 @@
+# Publish the provider network mirror to GitHub Pages.
+#
+# The mirror protocol is static JSON, so Pages is a sufficient host:
+#   /jibey-fs/fspanos/index.json      versions
+#   /jibey-fs/fspanos/<version>.json  archives per os_arch
+#
+# The zips are NOT copied here -- the JSON points at the release assets, so a
+# publish is a few KB. Consumers set:
+#
+#   provider_installation {
+#     network_mirror { url = "https://jibey-fs.github.io/terraform-provider-fspanos/" }
+#   }
+#
+# No GPG involved: the mirror protocol verifies by hash, taken from the
+# SHA256SUMS the release workflow already produces.
+
+name: Mirror
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to (re)publish, e.g. 2.1.0"
+        required: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+        env:
+          VERSION: ${{ github.event.inputs.version || github.event.release.tag_name }}
+
+      # Keep previously published versions so older releases stay installable.
+      - name: Fetch current mirror
+        continue-on-error: true
+        run: |
+          curl -fsSL -o - https://jibey-fs.github.io/terraform-provider-fspanos/jibey-fs/fspanos/index.json \
+            | tee /tmp/index.json
+          mkdir -p site/jibey-fs/fspanos && cp /tmp/index.json site/jibey-fs/fspanos/index.json
+
+      - name: Download release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v${{ steps.v.outputs.version }}" -R "$GITHUB_REPOSITORY" \
+            -p '*_SHA256SUMS' -O /tmp/SHA256SUMS --clobber
+
+      - name: Build mirror index
+        run: |
+          python3 scripts/build-mirror.py \
+            --version "${{ steps.v.outputs.version }}" \
+            --sums /tmp/SHA256SUMS \
+            --out site
+          find site -type f | sort
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

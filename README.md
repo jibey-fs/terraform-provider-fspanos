@@ -6,6 +6,23 @@ carrying NGFW-clustering support that upstream does not yet have.
 Published as `jibey-fs/fspanos` so it can be used from the registry alongside —
 not instead of — the upstream provider.
 
+Distributed as a **network mirror on GitHub Pages** rather than through the
+Terraform or OpenTofu registries — no registry submission, no GPG key, and no
+public listing of a Palo Alto derivative. `init`, version constraints and the
+lock file all behave normally.
+
+```hcl
+# .tofurc / .terraformrc
+provider_installation {
+  network_mirror {
+    url = "https://jibey-fs.github.io/terraform-provider-fspanos/"
+  }
+  direct {
+    exclude = ["jibey-fs/fspanos"]
+  }
+}
+```
+
 ```hcl
 terraform {
   required_providers {
@@ -16,6 +33,10 @@ terraform {
   }
 }
 ```
+
+The mirror is two static JSON files pointing at the GitHub release assets; the
+zips are never copied. Integrity is by SHA256 from the release checksums,
+recorded in your lock file on first use.
 
 Everything else is identical to upstream `2.0.13`: same resources, same schema,
 same behaviour. Only the three changes below are added.
