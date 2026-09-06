@@ -1,0 +1,1728 @@
+package provider_test
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+	"testing"
+
+	"github.com/PaloAltoNetworks/pango/policies/rules/security"
+
+	"github.com/hashicorp/terraform-plugin-testing/config"
+	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/statecheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+)
+
+const securityPolicyRulesImportInitial = `
+variable "prefix" { type = string }
+
+resource "panos_device_group" "example" {
+  location = { panorama = {} }
+
+  name = format("%s-dg", var.prefix)
+}
+
+resource "panos_security_policy_rules" "rules" {
+  location = {
+    device_group = {
+      name = panos_device_group.example.name
+      rulebase = "pre-rulebase"
+    }
+  }
+
+  position = { where = "last" }
+
+  rules = [
+    for idx in range(2, 5) : {
+        name = format("rule-%s", idx)
+
+        source_addresses = ["any"]
+        source_zones = ["any"]
+
+        destination_addresses = ["any"]
+        destination_zones = ["any"]
+
+        services = ["any"]
+        applications = ["any"]
+    }
+  ]
+}
+`
+
+const securityPolicyRulesImportStep = `
+resource "panos_security_policy_rules" "imported" {}
+`
+
+func TestAccSecurityPolicyRulesImport(t *testing.T) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+
+	configStep2 := mergeConfigs(
+		securityPolicyRulesImportInitial,
+		securityPolicyRulesImportStep,
+	)
+
+	importStateGenerateIDWithPrefixAndRules := func(rules []string) func(state *terraform.State) (string, error) {
+		return func(state *terraform.State) (string, error) {
+			return securityPolicyRulesGenerateImportID(state, prefix, rules)
+		}
+	}
+
+	// Import with a superset of rules (rule-5 doesn't exist on server).
+	// ReadMany now handles missing entries gracefully by returning only existing ones,
+	// so this import succeeds with the 3 existing rules rather than failing.
+	importStateGenerateIDPartial := importStateGenerateIDWithPrefixAndRules([]string{"rule-2", "rule-3", "rule-4", "rule-5"})
+	importStateGenerateIDValid := importStateGenerateIDWithPrefixAndRules([]string{"rule-2", "rule-3", "rule-4"})
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+		},
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: securityPolicyRulesImportInitial,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+			},
+			{
+				Config: configStep2,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ResourceName:      "panos_security_policy_rules.imported",
+				ImportState:       true,
+				ImportStateIdFunc: importStateGenerateIDPartial,
+			},
+			{
+				Config: configStep2,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ResourceName:      "panos_security_policy_rules.imported",
+				ImportState:       true,
+				ImportStateIdFunc: importStateGenerateIDValid,
+			},
+		},
+	})
+}
+
+func securityPolicyRulesGenerateImportID(_ *terraform.State, prefix string, names []string) (string, error) {
+	locationData := map[string]any{
+		"device_group": map[string]any{
+			"panorama_device": "localhost.localdomain",
+			"name":            fmt.Sprintf("%s-dg", prefix),
+			"rulebase":        "pre-rulebase",
+		},
+	}
+
+	positionData := map[string]any{
+		"where": "last",
+	}
+
+	importState := map[string]any{
+		"position": positionData,
+		"location": locationData,
+		"names":    names,
+	}
+
+	marshalled, err := json.Marshal(importState)
+	if err != nil {
+		return "", fmt.Errorf("Failed to marshal import state into JSON: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(marshalled), nil
+}
+
+const securityPolicyRulesPositionFirst = `
+variable "position" { type = any }
+variable "prefix" { type = string }
+variable "rule_names" { type = list(string) }
+
+resource "panos_security_policy_rules" "policy" {
+  location = { device_group = { name = format("%s-dg", var.prefix), rulebase = "pre-rulebase" } }
+
+  position = var.position
+
+  rules = [
+    for index, name in var.rule_names: {
+      name = name
+
+      source_zones     = ["any"]
+      source_addresses = ["any"]
+
+      destination_zones     = ["any"]
+      destination_addresses = ["any"]
+
+      services = ["any"]
+      applications = ["any"]
+    }
+  ]
+}
+`
+
+const securityPolicyRulesPositionIndirectlyBefore = `
+variable "position" { type = any }
+variable "rule_names" { type = list(string) }
+variable "prefix" { type = string }
+
+resource "panos_security_policy_rules" "policy" {
+  location = { device_group = { name = format("%s-dg", var.prefix), rulebase = "pre-rulebase" }}
+
+  position = var.position
+
+  rules = [
+    for index, name in var.rule_names: {
+      name = name
+
+      source_zones     = ["any"]
+      source_addresses = ["any"]
+
+      destination_zones     = ["any"]
+      destination_addresses = ["any"]
+
+      services = ["any"]
+      applications = ["any"]
+    }
+  ]
+}
+`
+
+const securityPolicyRulesPositionDirectlyBefore = `
+variable "rule_names" { type = list(string) }
+variable "prefix" { type = string }
+
+resource "panos_security_policy_rules" "policy" {
+  location = { device_group = { name = format("%s-dg", var.prefix), rulebase = "pre-rulebase" }}
+
+  position = {
+    where = "before"
+    directly = true
+    pivot = format("%s-rule-99", var.prefix)
+  }
+
+  rules = [
+    for index, name in var.rule_names: {
+      name = name
+
+      source_zones     = ["any"]
+      source_addresses = ["any"]
+
+      destination_zones     = ["any"]
+      destination_addresses = ["any"]
+
+      services = ["any"]
+      applications = ["any"]
+    }
+  ]
+}
+`
+
+const securityPolicyRulesPositionDirectlyAfter = `
+variable "rule_names" { type = list(string) }
+variable "prefix" { type = string }
+
+resource "panos_security_policy_rules" "policy" {
+  location = { device_group = { name = format("%s-dg", var.prefix), rulebase = "pre-rulebase" }}
+
+  position = {
+    where = "after"
+    directly = true
+    pivot = format("%s-rule-0", var.prefix)
+  }
+
+  rules = [
+    for index, name in var.rule_names: {
+      name = name
+
+      source_zones     = ["any"]
+      source_addresses = ["any"]
+
+      destination_zones     = ["any"]
+      destination_addresses = ["any"]
+
+      services = ["any"]
+      applications = ["any"]
+    }
+  ]
+}
+`
+
+const securityPolicyRulesPositionLast = `
+variable "rule_names" { type = list(string) }
+variable "prefix" { type = string }
+
+resource "panos_security_policy_rules" "policy" {
+  location = { device_group = { name = format("%s-dg", var.prefix), rulebase = "pre-rulebase" }}
+
+  position = {
+    where = "last"
+  }
+
+  rules = [
+    for index, name in var.rule_names: {
+      name = name
+
+      source_zones     = ["any"]
+      source_addresses = ["any"]
+
+      destination_zones     = ["any"]
+      destination_addresses = ["any"]
+
+      services = ["any"]
+      applications = ["any"]
+    }
+  ]
+}
+`
+
+func prefixed(prefix string, name string) string {
+	return fmt.Sprintf("%s-%s", prefix, name)
+}
+
+func withPrefix(prefix string, rules []string) []config.Variable {
+	var result []config.Variable
+	for _, elt := range rules {
+		result = append(result, config.StringVariable(prefixed(prefix, elt)))
+	}
+
+	return result
+}
+
+func TestAccSecurityPolicyRulesPositioning(t *testing.T) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+
+	ruleNames := []string{"rule-2", "rule-3", "rule-4", "rule-5", "rule-6"}
+
+	stateExpectedRuleName := func(idx int, value string) statecheck.StateCheck {
+		return statecheck.ExpectKnownValue(
+			"panos_security_policy_rules.policy",
+			tfjsonpath.New("rules").AtSliceIndex(idx).AtMapKey("name"),
+			knownvalue.StringExact(prefixed(prefix, value)),
+		)
+	}
+
+	// planExpectedRuleName := func(idx int, value string) plancheck.PlanCheck {
+	// 	return plancheck.ExpectKnownValue(
+	// 		"panos_security_policy_rules.policy",
+	// 		tfjsonpath.New("rules").AtSliceIndex(idx).AtMapKey("name"),
+	// 		knownvalue.StringExact(prefixed(prefix, value)),
+	// 	)
+	// }
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+			securityPolicyRulesPreCheck(prefix)
+
+		},
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: securityPolicyRulesPositionFirst,
+				ConfigVariables: map[string]config.Variable{
+					"rule_names": config.ListVariable([]config.Variable{}...),
+					"prefix":     config.StringVariable(prefix),
+					"position": config.ObjectVariable(map[string]config.Variable{
+						"where": config.StringVariable("first"),
+					}),
+				},
+			},
+			{
+				Config: securityPolicyRulesPositionFirst,
+				ConfigVariables: map[string]config.Variable{
+					"rule_names": config.ListVariable([]config.Variable{}...),
+					"prefix":     config.StringVariable(prefix),
+					"position": config.ObjectVariable(map[string]config.Variable{
+						"where": config.StringVariable("first"),
+					}),
+				},
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+			{
+				Config: securityPolicyRulesPositionFirst,
+				ConfigVariables: map[string]config.Variable{
+					"rule_names": config.ListVariable(withPrefix(prefix, ruleNames)...),
+					"prefix":     config.StringVariable(prefix),
+					"position": config.ObjectVariable(map[string]config.Variable{
+						"where": config.StringVariable("first"),
+					}),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					stateExpectedRuleName(0, "rule-2"),
+					stateExpectedRuleName(1, "rule-3"),
+					stateExpectedRuleName(2, "rule-4"),
+					stateExpectedRuleName(3, "rule-5"),
+					stateExpectedRuleName(4, "rule-6"),
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-2", "rule-3", "rule-4", "rule-5", "rule-6", "rule-0", "rule-1", "rule-99"}),
+				},
+			},
+			{
+				Config: securityPolicyRulesPositionIndirectlyBefore,
+				ConfigVariables: map[string]config.Variable{
+					"rule_names": config.ListVariable(withPrefix(prefix, ruleNames)...),
+					"prefix":     config.StringVariable(prefix),
+					"position": config.ObjectVariable(map[string]config.Variable{
+						"where":    config.StringVariable("before"),
+						"directly": config.BoolVariable(false),
+						"pivot":    config.StringVariable(fmt.Sprintf("%s-rule-99", prefix)),
+					}),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					stateExpectedRuleName(0, "rule-2"),
+					stateExpectedRuleName(1, "rule-3"),
+					stateExpectedRuleName(2, "rule-4"),
+					stateExpectedRuleName(3, "rule-5"),
+					stateExpectedRuleName(4, "rule-6"),
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-2", "rule-3", "rule-4", "rule-5", "rule-6", "rule-0", "rule-1", "rule-99"}),
+				},
+			},
+			{
+				Config: securityPolicyRulesPositionDirectlyBefore,
+				ConfigVariables: map[string]config.Variable{
+					"rule_names": config.ListVariable(withPrefix(prefix, ruleNames)...),
+					"prefix":     config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					stateExpectedRuleName(0, "rule-2"),
+					stateExpectedRuleName(1, "rule-3"),
+					stateExpectedRuleName(2, "rule-4"),
+					stateExpectedRuleName(3, "rule-5"),
+					stateExpectedRuleName(4, "rule-6"),
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-0", "rule-1", "rule-2", "rule-3", "rule-4", "rule-5", "rule-6", "rule-99"}),
+				},
+			},
+			{
+				Config: securityPolicyRulesPositionDirectlyAfter,
+				ConfigVariables: map[string]config.Variable{
+					"rule_names": config.ListVariable(withPrefix(prefix, ruleNames)...),
+					"prefix":     config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					stateExpectedRuleName(0, "rule-2"),
+					stateExpectedRuleName(1, "rule-3"),
+					stateExpectedRuleName(2, "rule-4"),
+					stateExpectedRuleName(3, "rule-5"),
+					stateExpectedRuleName(4, "rule-6"),
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-0", "rule-2", "rule-3", "rule-4", "rule-5", "rule-6", "rule-1", "rule-99"}),
+				},
+			},
+			{
+				Config: securityPolicyRulesPositionLast,
+				ConfigVariables: map[string]config.Variable{
+					"rule_names": config.ListVariable(withPrefix(prefix, ruleNames)...),
+					"prefix":     config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					stateExpectedRuleName(0, "rule-2"),
+					stateExpectedRuleName(1, "rule-3"),
+					stateExpectedRuleName(2, "rule-4"),
+					stateExpectedRuleName(3, "rule-5"),
+					stateExpectedRuleName(4, "rule-6"),
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-0", "rule-1", "rule-99", "rule-2", "rule-3", "rule-4", "rule-5", "rule-6"}),
+				},
+			},
+		},
+	})
+}
+
+const securityPolicyRulesOrderingDependantInitial = `
+variable "prefix" { type = string }
+
+resource "panos_device_group" "dg" {
+  location = { panorama = {} }
+
+  name = format("%s-dg", var.prefix)
+}
+
+resource "panos_security_policy_rules" "rule-1" {
+  location = { device_group = { name = panos_device_group.dg.name } }
+
+  position = { where = "first" }
+
+  rules = [{
+    name = format("%s-rule-1", var.prefix)
+
+    source_zones     = ["any"]
+    source_addresses = ["1.1.1.1"]
+
+    destination_zones     = ["any"]
+    destination_addresses = ["172.0.0.1/8"]
+
+    services = ["any"]
+    applications = ["any"]
+  }]
+}
+`
+
+const securityPolicyRulesOrderingDependant2 = `
+resource "panos_security_policy_rules" "rule-255" {
+  location = { device_group = { name = panos_device_group.dg.name } }
+
+  position = { where = "last" }
+
+  rules = [{
+    name = format("%s-rule-255", var.prefix)
+
+    source_zones     = ["any"]
+    source_addresses = ["1.1.1.255"]
+
+    destination_zones     = ["any"]
+    destination_addresses = ["172.0.0.255/8"]
+
+    services     = ["any"]
+    applications = ["any"]
+  }]
+}
+`
+
+const securityPolicyRulesOrderingDependant3 = `
+resource "panos_security_policy_rules" "example-directly-after" {
+  location = { device_group = { name = panos_device_group.dg.name } }
+
+  position = { where = "after", directly = true, pivot = "${var.prefix}-rule-1" }
+
+  rules = [for k in [2, 3, ] :
+    {
+      name                  = "${var.prefix}-rule-${k}"
+      source_zones          = ["any"]
+      source_addresses      = ["1.1.1.${k}"]
+      destination_zones     = ["any"]
+      destination_addresses = ["172.0.0.${k}/8"]
+      services              = ["any"]
+      applications          = ["any"]
+    }
+  ]
+}
+`
+
+const securityPolicyRulesOrderingDependant4 = `
+resource "panos_security_policy_rules" "rules-after-rule-1" {
+  location = { device_group = { name = panos_device_group.dg.name } }
+
+  position = { where = "after", directly = false, pivot = format("%s-rule-1", var.prefix) }
+
+  rules = [for k in [4, 5] :
+    {
+      name = format("%s-rule-%s", var.prefix, k)
+
+      source_zones          = ["any"],
+      source_addresses      = ["1.1.1.${k}"],
+      destination_zones     = ["any"],
+      destination_addresses = ["172.0.0.${k}/8"],
+      services              = ["any"],
+      applications          = ["any"],
+    }
+  ]
+}
+`
+
+const securityPolicyRulesOrderingDependant5 = `
+resource "panos_security_policy_rules" "rules-directly-before-rule-255" {
+  location = { device_group = { name = panos_device_group.dg.name } }
+
+  position = { where = "before", directly = true, pivot = "${var.prefix}-rule-255" }
+
+  rules = [for k in [6, 7] :
+    {
+      name                  = "${var.prefix}-rule-${k}",
+      source_zones          = ["any"],
+      source_addresses      = ["1.1.1.${k}"],
+      destination_zones     = ["any"],
+      destination_addresses = ["172.0.0.${k}/8"],
+      services              = ["any"],
+      applications          = ["any"],
+    }
+  ]
+}
+`
+
+const securityPolicyRulesOrderingDependant6 = `
+resource "panos_security_policy_rules" "rules-before-rule-255" {
+  location = { device_group = { name = panos_device_group.dg.name } }
+
+  position = { where = "before", directly = false, pivot = "${var.prefix}-rule-255" }
+
+  rules = [for k in [8, 9] :
+    {
+      name                  = "${var.prefix}-rule-${k}",
+      source_zones          = ["any"],
+      source_addresses      = ["1.1.1.${k}"],
+      destination_zones     = ["any"],
+      destination_addresses = ["172.0.0.${k}/8"],
+      services              = ["any"],
+      applications          = ["any"],
+    }
+  ]
+}
+`
+
+func TestAccSecurityPolicyRulesOrderingDependant(t *testing.T) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+
+	configStep1 := securityPolicyRulesOrderingDependantInitial
+	configStep2 := mergeConfigs(
+		securityPolicyRulesOrderingDependantInitial,
+		securityPolicyRulesOrderingDependant2,
+	)
+	configStep3 := mergeConfigs(
+		configStep2,
+		securityPolicyRulesOrderingDependant3,
+	)
+	configStep4 := mergeConfigs(
+		configStep3,
+		securityPolicyRulesOrderingDependant4,
+	)
+	configStep5 := mergeConfigs(
+		configStep4,
+		securityPolicyRulesOrderingDependant5,
+	)
+	configStep6 := mergeConfigs(
+		configStep5,
+		securityPolicyRulesOrderingDependant6,
+	)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+
+		},
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: configStep1,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-1"}),
+				},
+			},
+			{
+				Config: configStep2,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-1", "rule-255"}),
+				},
+			},
+			{
+				Config: configStep3,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-1", "rule-2", "rule-3", "rule-255"}),
+				},
+			},
+			{
+				Config: configStep4,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ExpectNonEmptyPlan: true,
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-1", "rule-2", "rule-3", "rule-255", "rule-4", "rule-5"}),
+				},
+			},
+			{
+				Config: configStep4,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-1", "rule-2", "rule-3", "rule-4", "rule-5", "rule-255"}),
+				},
+			},
+			{
+				Config: configStep5,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-1", "rule-2", "rule-3", "rule-4", "rule-5", "rule-6", "rule-7", "rule-255"}),
+				},
+			},
+			{
+				Config: configStep6,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ExpectNonEmptyPlan: true,
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-1", "rule-2", "rule-3", "rule-4", "rule-5", "rule-6", "rule-7", "rule-8", "rule-9", "rule-255"}),
+				},
+			},
+			{
+				Config: configStep6,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-1", "rule-2", "rule-3", "rule-4", "rule-5", "rule-8", "rule-9", "rule-6", "rule-7", "rule-255"}),
+				},
+			},
+		},
+	})
+}
+
+func TestAccSecurityPolicyRules_PositionAsVariable(t *testing.T) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+
+	ruleNames := []string{"rule-2", "rule-3"}
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+			securityPolicyRulesPreCheck(prefix)
+
+		},
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: securityPolicyRules_PositionAsVariable_Tmpl,
+				ConfigVariables: map[string]config.Variable{
+					"rule_names": config.ListVariable(withPrefix(prefix, ruleNames)...),
+					"prefix":     config.StringVariable(prefix),
+					"position": config.ObjectVariable(map[string]config.Variable{
+						"where":    config.StringVariable("before"),
+						"directly": config.BoolVariable(true),
+						"pivot":    config.StringVariable(fmt.Sprintf("%s-rule-1", prefix)),
+					}),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-0", "rule-2", "rule-3", "rule-1", "rule-99"}),
+				},
+			},
+			{
+				Config: securityPolicyRules_PositionAsVariable_Tmpl,
+				ConfigVariables: map[string]config.Variable{
+					"rule_names": config.ListVariable(withPrefix(prefix, ruleNames)...),
+					"prefix":     config.StringVariable(prefix),
+					"position": config.ObjectVariable(map[string]config.Variable{
+						"where":    config.StringVariable("before"),
+						"directly": config.BoolVariable(true),
+						"pivot":    config.StringVariable(fmt.Sprintf("%s-rule-99", prefix)),
+					}),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, []string{"rule-0", "rule-1", "rule-2", "rule-3", "rule-99"}),
+				},
+			},
+		},
+	})
+}
+
+const securityPolicyRules_PositionAsVariable_Tmpl = `
+variable "position" { type = any }
+variable "prefix" { type = string }
+variable "rule_names" { type = list(string) }
+
+resource "panos_security_policy_rules" "policy" {
+  location = { device_group = { name = format("%s-dg", var.prefix), rulebase = "pre-rulebase" } }
+
+  position = var.position
+
+  rules = [
+    for index, name in var.rule_names: {
+      name = name
+
+      source_zones     = ["any"]
+      source_addresses = ["any"]
+
+      destination_zones     = ["any"]
+      destination_addresses = ["any"]
+
+      services = ["any"]
+      applications = ["any"]
+    }
+  ]
+}
+`
+
+func TestAccSecurityPolicyRules_WithLifecycle_IgnoredChanges(t *testing.T) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+			securityPolicyRulesPreCheck(prefix)
+
+		},
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: securityPolicyRules_WithLifecycle_IgnoredChanges_Initial_Tmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+			},
+			{
+				Config: securityPolicyRules_WithLifecycle_IgnoredChanges_Initial_Tmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				PlanOnly: true,
+			},
+			{
+				Config: securityPolicyRules_WithLifecycle_IgnoredChanges_Initial_Tmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+			},
+			{
+				Config: securityPolicyRules_WithLifecycle_IgnoredChanges_Final_Tmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+			},
+			{
+				Config: securityPolicyRules_WithLifecycle_IgnoredChanges_Final_Tmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+			},
+		},
+	})
+}
+
+const securityPolicyRules_WithLifecycle_IgnoredChanges_Initial_Tmpl = `
+variable "prefix" {
+  type = string
+}
+
+resource "panos_device_group" "example" {
+  location = { panorama = {} }
+
+  name = var.prefix
+}
+
+resource "panos_security_policy_rules" "first" {
+  location = { device_group = { name = panos_device_group.example.name } }
+
+  position = { where = "first" }
+
+  rules = [{
+    name = "rule-1"
+
+    source_zones     = ["any"]
+    source_addresses = ["any"]
+
+    destination_zones     = ["any"]
+    destination_addresses = ["any"]
+
+    services = ["any"]
+    applications = ["any"]
+  }]
+
+  lifecycle {
+    ignore_changes = [position]
+  }
+}
+
+resource "panos_security_policy_rules" "second" {
+  depends_on = [panos_security_policy_rules.first]
+  location = { device_group = { name = panos_device_group.example.name } }
+
+  position = { where = "first" }
+
+  rules = [{
+    name = "rule-2"
+
+    source_zones     = ["any"]
+    source_addresses = ["any"]
+
+    destination_zones     = ["any"]
+    destination_addresses = ["any"]
+
+    services = ["any"]
+    applications = ["any"]
+  }]
+
+  lifecycle {
+    ignore_changes = [position]
+  }
+}
+`
+
+const securityPolicyRules_WithLifecycle_IgnoredChanges_Final_Tmpl = `
+variable "prefix" {
+  type = string
+}
+
+resource "panos_device_group" "example" {
+  location = { panorama = {} }
+
+  name = var.prefix
+}
+
+resource "panos_security_policy_rules" "first" {
+  location = { device_group = { name = panos_device_group.example.name } }
+
+  position = { where = "first" }
+
+  rules = [{
+    name = "rule-1"
+
+    source_zones     = ["any"]
+    source_addresses = ["any"]
+
+    destination_zones     = ["any"]
+    destination_addresses = ["any"]
+
+    services = ["any"]
+    applications = ["any"]
+  }]
+}
+
+resource "panos_security_policy_rules" "second" {
+  depends_on = [panos_security_policy_rules.first]
+  location = { device_group = { name = panos_device_group.example.name } }
+
+  position = { where = "first" }
+
+  rules = [{
+    name = "rule-2"
+
+    source_zones     = ["any"]
+    source_addresses = ["any"]
+
+    destination_zones     = ["any"]
+    destination_addresses = ["any"]
+
+    services = ["any"]
+    applications = ["any"]
+  }]
+
+  lifecycle {
+    ignore_changes = [position]
+  }
+}
+`
+
+func securityPolicyRulesPreCheck(prefix string) {
+	service := security.NewService(sdkClient)
+	ctx := context.TODO()
+
+	stringPointer := func(value string) *string { return &value }
+
+	location := security.NewDeviceGroupLocation()
+	location.DeviceGroup.DeviceGroup = fmt.Sprintf("%s-dg", prefix)
+
+	rules := []security.Entry{
+		{
+			Name:        fmt.Sprintf("%s-rule-0", prefix),
+			Description: stringPointer("Rule 0"),
+			Source:      []string{"any"},
+			Destination: []string{"any"},
+			From:        []string{"any"},
+			To:          []string{"any"},
+			Service:     []string{"any"},
+		},
+		{
+			Name:        fmt.Sprintf("%s-rule-1", prefix),
+			Description: stringPointer("Rule 0"),
+			Source:      []string{"any"},
+			Destination: []string{"any"},
+			From:        []string{"any"},
+			To:          []string{"any"},
+			Service:     []string{"any"},
+		},
+		{
+			Name:        fmt.Sprintf("%s-rule-99", prefix),
+			Description: stringPointer("Rule 99"),
+			Source:      []string{"any"},
+			Destination: []string{"any"},
+			From:        []string{"any"},
+			To:          []string{"any"},
+			Service:     []string{"any"},
+		},
+	}
+
+	for _, elt := range rules {
+		_, err := service.Create(ctx, *location, &elt)
+		if err != nil {
+			panic(fmt.Sprintf("natPolicyPreCheck failed: %s", err))
+		}
+
+	}
+}
+
+const securityPolicyRules_Hierarchy_Initial_Tmpl = `
+variable prefix { type = string }
+
+resource "panos_device_group" "parent" {
+  location = { panorama = {} }
+
+  name = format("%s-parent", var.prefix)
+}
+
+resource "panos_device_group" "child" {
+  location = { panorama = {} }
+
+  name = format("%s-child", var.prefix)
+}
+
+resource "panos_device_group_parent" "relation" {
+  location = { panorama = {} }
+
+  device_group = panos_device_group.child.name
+  parent       = panos_device_group.parent.name
+}
+`
+
+const securityPolicyRules_Hierarchy_Parent_Entries_Tmpl = `
+variable "parent_rule_names" {
+  type = list(string)
+}
+
+resource "panos_security_policy_rules" "parent" {
+  location = { device_group = { name = panos_device_group.parent.name } }
+
+  position = { where = "first" }
+
+  rules = [
+    for index, name in var.parent_rule_names: {
+      name = name
+
+      source_zones     = ["any"]
+      source_addresses = ["any"]
+
+      destination_zones     = ["any"]
+      destination_addresses = ["any"]
+
+      services = ["any"]
+      applications = ["any"]
+    }
+  ]
+}
+`
+
+const securityPolicyRules_Hierarchy_Child_Entries_Tmpl = `
+variable "child_rule_names" {
+  type = list(string)
+}
+
+resource "panos_security_policy_rules" "child" {
+  location = { device_group = { name = panos_device_group.child.name} }
+
+  position = { where = "first" }
+
+  rules = [
+    for index, name in var.child_rule_names: {
+      name = name
+
+      source_zones     = ["any"]
+      source_addresses = ["any"]
+
+      destination_zones     = ["any"]
+      destination_addresses = ["any"]
+
+      services = ["any"]
+      applications = ["any"]
+    }
+  ]
+}
+`
+
+func testAccSecurityPolicyRules_Hierarchy(t *testing.T, parent config.Variable, child config.Variable) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+
+	configStep1 := securityPolicyRules_Hierarchy_Initial_Tmpl
+	configStep2 := mergeConfigs(
+		securityPolicyRules_Hierarchy_Initial_Tmpl,
+		securityPolicyRules_Hierarchy_Parent_Entries_Tmpl,
+	)
+	configStep3 := mergeConfigs(
+		securityPolicyRules_Hierarchy_Initial_Tmpl,
+		securityPolicyRules_Hierarchy_Parent_Entries_Tmpl,
+		securityPolicyRules_Hierarchy_Child_Entries_Tmpl,
+	)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+			securityPolicyPreCheck(prefix)
+
+		},
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: configStep1,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+			},
+			{
+				Config: configStep2,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":            config.StringVariable(prefix),
+					"parent_rule_names": parent,
+				},
+			},
+			{
+				Config: configStep3,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":            config.StringVariable(prefix),
+					"parent_rule_names": parent,
+					"child_rule_names":  child,
+				},
+			},
+		},
+	})
+}
+
+func TestAccSecurityPolicyRules_Hierarchy_UniqueNames(t *testing.T) {
+	parentRules := config.ListVariable(config.StringVariable("rule-1"), config.StringVariable("rule-2"))
+	childRules := config.ListVariable(config.StringVariable("rule-3"), config.StringVariable("rule-4"))
+	testAccSecurityPolicyRules_Hierarchy(t, parentRules, childRules)
+}
+
+const securityPolicyRules_UpdateMissing_Tmpl = `
+variable "prefix" { type = string }
+variable "rule_names" { type = list(string) }
+
+resource "panos_security_policy_rules" "policy" {
+  location = { device_group = { name = format("%s-dg", var.prefix) }}
+
+  position = { where = "first" }
+
+  rules = [
+    for index, name in var.rule_names: {
+      name = name
+
+      source_zones     = ["any"]
+      source_addresses = ["any"]
+
+      destination_zones     = ["any"]
+      destination_addresses = ["any"]
+
+      services = ["any"]
+      applications = ["any"]
+    }
+  ]
+}
+`
+
+func TestAccSecurityPolicyRules_UpdateMissing(t *testing.T) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+	rules := []string{"rule-1", "rule-2", "rule-3"}
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+
+		},
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: securityPolicyRules_UpdateMissing_Tmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":     config.StringVariable(prefix),
+					"rule_names": config.ListVariable(withPrefix(prefix, rules)...),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, rules),
+				},
+			},
+			{
+				Config: securityPolicyRules_UpdateMissing_Tmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":     config.StringVariable(prefix),
+					"rule_names": config.ListVariable(withPrefix(prefix, rules)...),
+				},
+				PreConfig: func() {
+					DeleteServerSecurityRules(prefix, []string{"rule-2"})
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					ExpectServerSecurityRulesOrder(prefix, rules),
+				},
+			},
+		},
+	})
+}
+
+const securityPolicyRules_BeforePivot_Initial_Tmpl = `
+variable "prefix" { type = string }
+
+resource "panos_device_group" "dg" {
+  location = { panorama = {} }
+  name = format("%s-dg", var.prefix)
+}
+
+resource "panos_security_policy_rules" "pivot" {
+  location = { device_group = { name = panos_device_group.dg.name } }
+  position = { where = "last" }
+  rules = [{
+    name                  = format("%s-pivot-rule", var.prefix)
+    source_zones          = ["any"]
+    source_addresses      = ["any"]
+    destination_zones     = ["any"]
+    destination_addresses = ["any"]
+    services              = ["any"]
+    applications          = ["any"]
+  }]
+}
+`
+
+const securityPolicyRules_BeforePivot_Rule_Tmpl = `
+variable "destination_addresses" { type = list(string) }
+
+resource "panos_security_policy_rules" "policy" {
+  depends_on = [panos_security_policy_rules.pivot]
+  location   = { device_group = { name = panos_device_group.dg.name } }
+  position = {
+    where    = "before"
+    directly = true
+    pivot    = format("%s-pivot-rule", var.prefix)
+  }
+  rules = [{
+    name                  = format("%s-test-rule", var.prefix)
+    source_zones          = ["any"]
+    source_addresses      = ["any"]
+    destination_zones     = ["any"]
+    destination_addresses = var.destination_addresses
+    services              = ["any"]
+    applications          = ["any"]
+  }]
+
+  lifecycle {
+    ignore_changes = [position]
+  }
+}
+`
+
+func TestAccSecurityPolicyRules_BeforePivotWithUpdate(t *testing.T) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+
+	configInitial := securityPolicyRules_BeforePivot_Initial_Tmpl
+	configWithRule := mergeConfigs(
+		securityPolicyRules_BeforePivot_Initial_Tmpl,
+		securityPolicyRules_BeforePivot_Rule_Tmpl,
+	)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+		},
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: configInitial,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+			},
+			{
+				Config: configWithRule,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":                config.StringVariable(prefix),
+					"destination_addresses": config.ListVariable(config.StringVariable("10.0.0.1")),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"panos_security_policy_rules.policy",
+						tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("destination_addresses"),
+						knownvalue.ListExact([]knownvalue.Check{
+							knownvalue.StringExact("10.0.0.1"),
+						}),
+					),
+					ExpectServerSecurityRulesOrder(prefix, []string{"test-rule", "pivot-rule"}),
+				},
+			},
+			{
+				Config: configWithRule,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":                config.StringVariable(prefix),
+					"destination_addresses": config.ListVariable(config.StringVariable("10.0.0.1"), config.StringVariable("10.0.0.2")),
+				},
+				PreConfig: func() {
+					CreateServerSecurityRules(prefix, []string{"interloper"}, "pivot-rule")
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"panos_security_policy_rules.policy",
+						tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("destination_addresses"),
+						knownvalue.ListExact([]knownvalue.Check{
+							knownvalue.StringExact("10.0.0.1"),
+							knownvalue.StringExact("10.0.0.2"),
+						}),
+					),
+					ExpectServerSecurityRulesOrder(prefix, []string{"test-rule", "interloper", "pivot-rule"}),
+				},
+			},
+			{
+				Config: configWithRule,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":                config.StringVariable(prefix),
+					"destination_addresses": config.ListVariable(config.StringVariable("10.0.0.1"), config.StringVariable("10.0.0.2")),
+				},
+				PlanOnly: true,
+			},
+		},
+	})
+}
+
+func TestAccSecurityPolicyRules_AuditComment(t *testing.T) {
+	// Not using t.Parallel() because PAN-OS audit comments are ephemeral
+	// metadata on the shared candidate config. Concurrent tests modifying
+	// config under the same admin user invalidate each other's comments.
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+	dgName := fmt.Sprintf("%s-dg", prefix)
+
+	sdkLoc := security.NewDeviceGroupLocation()
+	sdkLoc.DeviceGroup.DeviceGroup = dgName
+	sdkLoc.DeviceGroup.Rulebase = "pre-rulebase"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			// Step 1: Create two rules with different initial audit comments
+			{
+				Config: securityPolicyRulesAuditCommentTmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":                  config.StringVariable(prefix),
+					"comment_1":               config.StringVariable("Rule 1 initial comment"),
+					"audit_comment_version_1": config.StringVariable("v1"),
+					"comment_2":               config.StringVariable("Rule 2 initial comment"),
+					"audit_comment_version_2": config.StringVariable("v1"),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"panos_security_policy_rules.test",
+						tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("name"),
+						knownvalue.StringExact(fmt.Sprintf("%s-rule-1", prefix)),
+					),
+					statecheck.ExpectKnownValue(
+						"panos_security_policy_rules.test",
+						tfjsonpath.New("rules").AtSliceIndex(1).AtMapKey("name"),
+						knownvalue.StringExact(fmt.Sprintf("%s-rule-2", prefix)),
+					),
+				},
+				Check: resource.ComposeTestCheckFunc(
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-1", "Rule 1 initial comment")
+					},
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-2", "Rule 2 initial comment")
+					},
+				),
+			},
+			// Step 2: Update only rule-1's audit comment (bump version), leave rule-2 unchanged
+			{
+				Config: securityPolicyRulesAuditCommentTmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":                  config.StringVariable(prefix),
+					"comment_1":               config.StringVariable("Rule 1 updated comment"),
+					"audit_comment_version_1": config.StringVariable("v2"),
+					"comment_2":               config.StringVariable("Rule 2 initial comment"),
+					"audit_comment_version_2": config.StringVariable("v1"), // unchanged
+				},
+				Check: resource.ComposeTestCheckFunc(
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-1", "Rule 1 updated comment")
+					},
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-2", "Rule 2 initial comment")
+					},
+				),
+			},
+			// Step 3: Update only rule-2's audit comment (bump version), leave rule-1 unchanged
+			{
+				Config: securityPolicyRulesAuditCommentTmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":                  config.StringVariable(prefix),
+					"comment_1":               config.StringVariable("Rule 1 updated comment"),
+					"audit_comment_version_1": config.StringVariable("v2"), // unchanged
+					"comment_2":               config.StringVariable("Rule 2 updated comment"),
+					"audit_comment_version_2": config.StringVariable("v2"),
+				},
+				Check: resource.ComposeTestCheckFunc(
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-1", "Rule 1 updated comment")
+					},
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-2", "Rule 2 updated comment")
+					},
+				),
+			},
+			// Step 4: Change both comments but only bump rule-2's version.
+			// Rule-1 should keep its old comment, rule-2 should get the new one.
+			{
+				Config: securityPolicyRulesAuditCommentTmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":                  config.StringVariable(prefix),
+					"comment_1":               config.StringVariable("Rule 1 should not update"),
+					"audit_comment_version_1": config.StringVariable("v2"), // unchanged
+					"comment_2":               config.StringVariable("Rule 2 version-gated update"),
+					"audit_comment_version_2": config.StringVariable("v3"),
+				},
+				Check: resource.ComposeTestCheckFunc(
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-1", "Rule 1 updated comment")
+					},
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-2", "Rule 2 version-gated update")
+					},
+				),
+			},
+			// Step 5: Bump both versions simultaneously with different comments
+			{
+				Config: securityPolicyRulesAuditCommentTmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix":                  config.StringVariable(prefix),
+					"comment_1":               config.StringVariable("Rule 1 final comment"),
+					"audit_comment_version_1": config.StringVariable("v3"),
+					"comment_2":               config.StringVariable("Rule 2 final comment"),
+					"audit_comment_version_2": config.StringVariable("v4"),
+				},
+				Check: resource.ComposeTestCheckFunc(
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-1", "Rule 1 final comment")
+					},
+					func(s *terraform.State) error {
+						return verifySecurityPolicyAuditCommentValue(s, *sdkLoc, prefix, "rule-2", "Rule 2 final comment")
+					},
+				),
+			},
+			// Step 6: Remove audit comment attributes from config
+			{
+				Config: securityPolicyRulesNoAuditCommentTmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"panos_security_policy_rules.test",
+						tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("name"),
+						knownvalue.StringExact(fmt.Sprintf("%s-rule-1", prefix)),
+					),
+					statecheck.ExpectKnownValue(
+						"panos_security_policy_rules.test",
+						tfjsonpath.New("rules").AtSliceIndex(1).AtMapKey("name"),
+						knownvalue.StringExact(fmt.Sprintf("%s-rule-2", prefix)),
+					),
+				},
+			},
+			// Step 7: Re-apply without audit comment - should not cause drift
+			{
+				Config: securityPolicyRulesNoAuditCommentTmpl,
+				ConfigVariables: map[string]config.Variable{
+					"prefix": config.StringVariable(prefix),
+				},
+				PlanOnly: true,
+			},
+		},
+	})
+}
+
+const securityPolicyRulesAuditCommentTmpl = `
+variable "prefix" { type = string }
+variable "comment_1" { type = string }
+variable "audit_comment_version_1" { type = string }
+variable "comment_2" { type = string }
+variable "audit_comment_version_2" { type = string }
+
+resource "panos_device_group" "test" {
+  location = { panorama = {} }
+  name = format("%s-dg", var.prefix)
+}
+
+resource "panos_security_policy_rules" "test" {
+  location = {
+    device_group = {
+      name     = panos_device_group.test.name
+      rulebase = "pre-rulebase"
+    }
+  }
+
+  position = {
+    where = "first"
+  }
+
+  rules = [
+    {
+      name                  = format("%s-rule-1", var.prefix)
+      audit_comment_wo      = var.comment_1
+      audit_comment_version = var.audit_comment_version_1
+      source_zones          = ["any"]
+      destination_zones     = ["any"]
+      source_addresses      = ["any"]
+      destination_addresses = ["any"]
+      applications          = ["any"]
+      services              = ["any"]
+      action                = "allow"
+    },
+    {
+      name                  = format("%s-rule-2", var.prefix)
+      audit_comment_wo      = var.comment_2
+      audit_comment_version = var.audit_comment_version_2
+      source_zones          = ["any"]
+      destination_zones     = ["any"]
+      source_addresses      = ["any"]
+      destination_addresses = ["any"]
+      applications          = ["any"]
+      services              = ["any"]
+      action                = "deny"
+    }
+  ]
+}
+`
+
+const securityPolicyRulesNoAuditCommentTmpl = `
+variable "prefix" { type = string }
+
+resource "panos_device_group" "test" {
+  location = { panorama = {} }
+  name = format("%s-dg", var.prefix)
+}
+
+resource "panos_security_policy_rules" "test" {
+  location = {
+    device_group = {
+      name     = panos_device_group.test.name
+      rulebase = "pre-rulebase"
+    }
+  }
+
+  position = {
+    where = "first"
+  }
+
+  rules = [
+    {
+      name                  = format("%s-rule-1", var.prefix)
+      source_zones          = ["any"]
+      destination_zones     = ["any"]
+      source_addresses      = ["any"]
+      destination_addresses = ["any"]
+      applications          = ["any"]
+      services              = ["any"]
+      action                = "allow"
+    },
+    {
+      name                  = format("%s-rule-2", var.prefix)
+      source_zones          = ["any"]
+      destination_zones     = ["any"]
+      source_addresses      = ["any"]
+      destination_addresses = ["any"]
+      applications          = ["any"]
+      services              = ["any"]
+      action                = "deny"
+    }
+  ]
+}
+`
+
+// verifySecurityPolicyAuditCommentValue checks the current uncommitted audit comment on a security policy rule.
+func verifySecurityPolicyAuditCommentValue(_ *terraform.State, loc security.Location, prefix, ruleName, expectedComment string) error {
+	ctx := context.Background()
+	fullRuleName := fmt.Sprintf("%s-%s", prefix, ruleName)
+
+	svc := security.NewService(sdkClient)
+	comment, err := svc.CurrentAuditComment(ctx, loc, fullRuleName)
+	if err != nil {
+		return fmt.Errorf("failed to get current audit comment: %w", err)
+	}
+
+	if comment != expectedComment {
+		return fmt.Errorf("audit comment mismatch: got %q, want %q", comment, expectedComment)
+	}
+
+	return nil
+}
+
+func mergeConfigs(configs ...string) string {
+	return strings.Join(configs, "\n")
+}
+
+func checkNoRulesInRulebase(t *testing.T, prefix string, rulebase string) func() {
+	return func() {
+		t.Helper()
+		location := security.NewDeviceGroupLocation()
+		location.DeviceGroup.DeviceGroup = fmt.Sprintf("%s-dg", prefix)
+		location.DeviceGroup.Rulebase = rulebase
+		service := security.NewService(sdkClient)
+		entries, err := service.List(context.TODO(), *location, "get", "", "")
+		if err != nil {
+			if err.Error() == "Object not found" {
+				return
+			}
+			t.Fatalf("unexpected error listing %s rules: %v", rulebase, err)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name, prefix) {
+				t.Fatalf("found leaked rule %q in %s after failed apply", entry.Name, rulebase)
+			}
+		}
+	}
+}
+
+const securityPolicyRules_InvalidPivot_Base_Tmpl = `
+variable "prefix" { type = string }
+
+resource "panos_device_group" "dg" {
+  location = { panorama = {} }
+  name = format("%s-dg", var.prefix)
+}
+
+resource "panos_security_policy_rules" "pre" {
+  location = { device_group = { name = panos_device_group.dg.name, rulebase = "pre-rulebase" } }
+  position = { where = "last" }
+  rules = [{
+    name                  = format("%s-pre-rule-1", var.prefix)
+    source_zones          = ["any"]
+    source_addresses      = ["any"]
+    destination_zones     = ["any"]
+    destination_addresses = ["any"]
+    services              = ["any"]
+    applications          = ["any"]
+  }]
+}
+`
+
+const securityPolicyRules_InvalidPivot_NonExistent_Tmpl = `
+resource "panos_security_policy_rules" "post" {
+  location = { device_group = { name = panos_device_group.dg.name, rulebase = "post-rulebase" } }
+  position = { where = "before", directly = true, pivot = format("%s-nonexistent", var.prefix) }
+  rules = [{
+    name                  = format("%s-post-rule-1", var.prefix)
+    source_zones          = ["any"]
+    source_addresses      = ["any"]
+    destination_zones     = ["any"]
+    destination_addresses = ["any"]
+    services              = ["any"]
+    applications          = ["any"]
+  }]
+}
+`
+
+const securityPolicyRules_InvalidPivot_CrossRulebase_Tmpl = `
+resource "panos_security_policy_rules" "post" {
+  location = { device_group = { name = panos_device_group.dg.name, rulebase = "post-rulebase" } }
+  position = { where = "before", directly = true, pivot = format("%s-pre-rule-1", var.prefix) }
+  rules = [{
+    name                  = format("%s-post-rule-1", var.prefix)
+    source_zones          = ["any"]
+    source_addresses      = ["any"]
+    destination_zones     = ["any"]
+    destination_addresses = ["any"]
+    services              = ["any"]
+    applications          = ["any"]
+  }]
+}
+`
+
+func TestAccSecurityPolicyRules_NonExistentPivot(t *testing.T) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+
+	configBase := securityPolicyRules_InvalidPivot_Base_Tmpl
+	configNonExistent := mergeConfigs(configBase, securityPolicyRules_InvalidPivot_NonExistent_Tmpl)
+
+	configVars := map[string]config.Variable{
+		"prefix": config.StringVariable(prefix),
+	}
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			// Step 1: Create device group + pre-rulebase rule
+			{
+				Config:          configBase,
+				ConfigVariables: configVars,
+			},
+			// Step 2: Add post-rulebase rule with non-existent pivot — expect apply failure
+			{
+				Config:          configNonExistent,
+				ConfigVariables: configVars,
+				ExpectError:     regexp.MustCompile("Failed to move group"),
+			},
+			// Step 3: Verify no rules leaked to post-rulebase
+			{
+				Config:          configBase,
+				ConfigVariables: configVars,
+				PreConfig:       checkNoRulesInRulebase(t, prefix, "post-rulebase"),
+			},
+		},
+	})
+}
+
+func TestAccSecurityPolicyRules_CrossRulebasePivot(t *testing.T) {
+	t.Parallel()
+
+	nameSuffix := acctest.RandStringFromCharSet(6, acctest.CharSetAlphaNum)
+	prefix := fmt.Sprintf("test-acc-%s", nameSuffix)
+
+	configBase := securityPolicyRules_InvalidPivot_Base_Tmpl
+	configCrossRulebase := mergeConfigs(configBase, securityPolicyRules_InvalidPivot_CrossRulebase_Tmpl)
+
+	configVars := map[string]config.Variable{
+		"prefix": config.StringVariable(prefix),
+	}
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			// Step 1: Create device group + pre-rulebase rule
+			{
+				Config:          configBase,
+				ConfigVariables: configVars,
+			},
+			// Step 2: Add post-rulebase rule using pre-rulebase rule as pivot — expect apply failure
+			{
+				Config:          configCrossRulebase,
+				ConfigVariables: configVars,
+				ExpectError:     regexp.MustCompile("Failed to move group"),
+			},
+			// Step 3: Verify no rules leaked to post-rulebase
+			{
+				Config:          configBase,
+				ConfigVariables: configVars,
+				PreConfig:       checkNoRulesInRulebase(t, prefix, "post-rulebase"),
+			},
+		},
+	})
+}
