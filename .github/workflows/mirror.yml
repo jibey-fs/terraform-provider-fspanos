@@ -17,6 +17,14 @@
 #
 # No GPG involved: the mirror protocol verifies by hash, taken from the
 # SHA256SUMS the release workflow already produces.
+#
+# The same site also serves the provider REGISTRY protocol, which needs no CLI
+# config at all (source = "jibey-fs.github.io/jibey-fs/fspanos"):
+#   /v1/providers/jibey-fs/fspanos/versions
+#   /v1/providers/jibey-fs/fspanos/<version>/download/<os>/<arch>
+# https://jibey-fs.github.io/.well-known/terraform.json (the jibey-fs.github.io
+# repo) points providers.v1 here. Download documents embed signing-key.asc so
+# the CLI verifies the SHA256SUMS signature.
 
 name: Mirror
 
@@ -84,6 +92,30 @@ jobs:
               curl -fsSL -o "site/$path/$v.json" "$MIRROR_URL/$path/$v.json" \
                 || echo "::warning::$h $v.json missing from the current mirror"
             done
+          done
+
+      # Same carry-over for the registry documents: the current `versions`
+      # plus every download document it lists.
+      - name: Fetch current registry documents
+        continue-on-error: true
+        env:
+          REGISTRY_URL: https://jibey-fs.github.io/terraform-provider-fspanos/v1/providers/jibey-fs/fspanos
+          REGISTRY_DIR: site/v1/providers/jibey-fs/fspanos
+        run: |
+          mkdir -p "$REGISTRY_DIR"
+          if ! curl -fsSL -o /tmp/versions "$REGISTRY_URL/versions"; then
+            echo "no current registry versions, starting empty"
+            exit 0
+          fi
+          if ! docs=$(python3 -c 'import json,sys; print("\n".join("/".join((v["version"], "download", p["os"], p["arch"])) for v in json.load(open(sys.argv[1]))["versions"] for p in v["platforms"]))' /tmp/versions); then
+            echo "::warning::current registry versions is not valid, starting empty"
+            exit 0
+          fi
+          cp /tmp/versions "$REGISTRY_DIR/versions"
+          for doc in $docs; do
+            mkdir -p "$REGISTRY_DIR/$(dirname "$doc")"
+            curl -fsSL -o "$REGISTRY_DIR/$doc" "$REGISTRY_URL/$doc" \
+              || echo "::warning::registry $doc missing from the current site"
           done
 
       - name: Download release checksums
