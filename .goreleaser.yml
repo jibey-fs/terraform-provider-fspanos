@@ -16,20 +16,24 @@ builds:
       - -trimpath
     ldflags:
       - "-s -w -X main.version={{.Version}} -X main.commit={{.Commit}}"
-    # Only the platforms this fork is actually consumed on: engineers' Macs
-    # and the linux/amd64 CI runners. The upstream matrix is 15 combinations,
-    # and at ~135 MB per binary that is several GB of artifacts -- enough to
-    # exhaust a GitHub runner mid-build (v2.1.0's first attempt died at 19
-    # minutes with no error, just a truncated log).
+    # Only the platforms this fork is actually consumed on: engineers'
+    # Apple-silicon Macs (darwin/arm64) and the Atlantis runners (linux/amd64).
+    # At ~135 MB per binary every extra target costs runner disk and memory;
+    # v2.1.0 died building four targets in parallel.
     goos:
       - linux
       - darwin
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: linux
+        goarch: arm64
+      - goos: darwin
+        goarch: amd64
     binary: "{{ .ProjectName }}_v{{ .Version }}"
 archives:
-  - format: zip
+  - formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 checksum:
   extra_files:
