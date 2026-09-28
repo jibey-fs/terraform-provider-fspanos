@@ -60,12 +60,31 @@ jobs:
           VERSION: ${{ inputs.version }}
 
       # Keep previously published versions so older releases stay installable.
+      # A deploy replaces the whole site, so every <version>.json the current
+      # index lists is carried over too. On the first publish there is no
+      # index yet: nothing is seeded and build-mirror.py starts from empty.
       - name: Fetch current mirror
         continue-on-error: true
+        env:
+          MIRROR_URL: https://jibey-fs.github.io/terraform-provider-fspanos
         run: |
-          curl -fsSL -o - https://jibey-fs.github.io/terraform-provider-fspanos/registry.opentofu.org/jibey-fs/fspanos/index.json \
-            | tee /tmp/index.json
-          for h in registry.opentofu.org registry.terraform.io; do mkdir -p "site/$h/jibey-fs/fspanos"; cp /tmp/index.json "site/$h/jibey-fs/fspanos/index.json"; done
+          for h in registry.opentofu.org registry.terraform.io; do
+            path="$h/jibey-fs/fspanos"
+            mkdir -p "site/$path"
+            if ! curl -fsSL -o /tmp/index.json "$MIRROR_URL/$path/index.json"; then
+              echo "no current index for $h, starting empty"
+              continue
+            fi
+            if ! versions=$(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["versions"]))' /tmp/index.json); then
+              echo "::warning::current index for $h is not valid JSON, starting empty"
+              continue
+            fi
+            cp /tmp/index.json "site/$path/index.json"
+            for v in $versions; do
+              curl -fsSL -o "site/$path/$v.json" "$MIRROR_URL/$path/$v.json" \
+                || echo "::warning::$h $v.json missing from the current mirror"
+            done
+          done
 
       - name: Download release checksums
         env:

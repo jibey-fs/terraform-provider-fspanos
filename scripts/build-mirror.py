@@ -25,6 +25,17 @@ HOSTNAMES = ["registry.opentofu.org", "registry.terraform.io"]
 PROJECT = "terraform-provider-fspanos"
 
 
+def load_versions(index_path):
+    """Versions from an existing index.json; empty if absent or unreadable."""
+    try:
+        return dict(json.loads(index_path.read_text())["versions"])
+    except FileNotFoundError:
+        return {}
+    except (ValueError, KeyError, TypeError) as e:
+        print(f"warning: ignoring invalid {index_path}: {e}")
+        return {}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", required=True)
@@ -55,10 +66,15 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
 
         # index.json accumulates versions, so an older release stays
-        # installable after a new one lands.
-        index_path = d / "index.json"
-        versions = json.loads(index_path.read_text())["versions"] if index_path.exists() else {}
+        # installable after a new one lands. A version whose <version>.json
+        # was not carried over is dropped: listing it would break installs.
+        versions = load_versions(d / "index.json")
+        for v in sorted(versions):
+            if not (d / f"{v}.json").exists():
+                print(f"warning: {host}: {v}.json missing, dropping {v} from the index")
+                del versions[v]
         versions[version] = {}
+        index_path = d / "index.json"
         index_path.write_text(json.dumps({"versions": versions}, indent=2, sort_keys=True) + "\n")
 
         (d / f"{version}.json").write_text(
